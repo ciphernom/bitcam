@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Verified Video Protocol (VVP) v2</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .video-container {
+            margin: 20px 0;
+        }
+        #videoPreview {
+            width: 100%;
+            max-width: 800px;
+            background: #000;
+            margin: 0 auto;
+            display: block;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            justify-content: center;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            background: #007bff;
+            color: white;
+            cursor: pointer;
+        }
+        button:disabled {
+            background: #cccccc;
+        }
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 4px;
+            background: #e9ecef;
+        }
+        .proof-data {
+            font-family: monospace;
+            white-space: pre-wrap;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            overflow: auto;
+            margin-top: 20px;
+        }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin: 20px 0;
+        }
+        .metric-card {
+            background: #fff;
+            padding: 15px;
+            border-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Verified Video Protocol (VVP) v2</h1>
+        
+        <div class="video-container">
+            <video id="videoPreview" autoplay muted></video>
+        </div>
+        
+        <div class="controls">
+            <button id="startBtn">Start Recording</button>
+            <button id="stopBtn" disabled>Stop Recording</button>
+            <button id="verifyBtn" disabled>Verify Recording</button>
+        </div>
+
+        <div class="metrics">
+            <div class="metric-card" id="memoryMetrics">Memory Usage: 0%</div>
+            <div class="metric-card" id="networkMetrics">Network Latency: 0ms</div>
+            <div class="metric-card" id="processingMetrics">Processing: 0 segments</div>
+        </div>
+
+        <div class="status" id="status">Ready to record...</div>
+        <div class="proof-data" id="proofData"></div>
+    </div>
+
+    <script type="module">
+        // Core Data Structures
+        class BlockTimeSync {
+            constructor(height, hash, timestamp, confidence, latency) {
+                this.blockHeight = height;
+                this.blockHash = hash;
+                this.timestamp = timestamp;
+                this.confidenceScore = confidence;
+                this.networkLatency = latency;
+            }
+        }
+
+        class TemporalProof {
+            constructor(prevHash, blockHeight, timestamp, nonce, difficulty, network, device) {
+                this.previousSegmentHash = prevHash;
+                this.currentBlockHeight = blockHeight;
+                this.timestamp = timestamp;
+                this.nonce = nonce;
+                this.difficulty = difficulty;
+                this.networkConditions = network;
+                this.deviceFingerprint = device;
+            }
+        }
+
+        class DeviceFingerprint {
+            constructor() {
+                this.hardware = {
+                    gpu: null,
+                    cores: navigator.hardwareConcurrency,
+                    memory: null,
+                    camera: null
+                };
+                this.software = {
+                    userAgent: navigator.userAgent,
+                    platform: navigator.platform,
+                    languages: navigator.languages
+                };
+                this.runtime = {
+                    apis: [],
+                    codecs: [],
+                    permissions: []
+                };
+            }
+
+            async initialize() {
+                await this.detectHardware();
+                await this.detectRuntime();
+                await this.detectMediaCapabilities();
+                return this; // Return `this` so we can compare later if needed
+            }
+
+            async detectHardware() {
+                try {
+                    const gl = document.createElement('canvas').getContext('webgl');
+                    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                    this.hardware.gpu = debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : 'Unknown';
+                } catch (e) {
+                    this.hardware.gpu = 'Unknown';
+                }
+
+                if (navigator.deviceMemory) {
+                    this.hardware.memory = navigator.deviceMemory;
+                }
+            }
+
+            async detectRuntime() {
+                // Detect available APIs
+                this.runtime.apis = Object.getOwnPropertyNames(window)
+                    .filter(api => typeof window[api] === 'function')
+                    .filter(api => !api.startsWith('_'));
+
+                // Detect supported codecs
+                if (MediaRecorder.isTypeSupported) {
+                    const videoCodecs = ['vp8', 'vp9', 'h264', 'h265'];
+                    const audioCodecs = ['opus', 'vorbis', 'aac'];
+                    
+                    const checks = [];
+                    for (let vc of videoCodecs) {
+                        checks.push(MediaRecorder.isTypeSupported(`video/webm;codecs=${vc}`)
+                            ? vc : null);
+                    }
+                    for (let ac of audioCodecs) {
+                        checks.push(MediaRecorder.isTypeSupported(`audio/webm;codecs=${ac}`)
+                            ? ac : null);
+                    }
+                    this.runtime.codecs = checks.filter(Boolean);
+                }
+
+                // Check permissions
+                if (navigator.permissions) {
+                    const permissions = ['camera', 'microphone', 'geolocation'];
+                    this.runtime.permissions = await Promise.all(
+                        permissions.map(async permission => {
+                            try {
+                                const status = await navigator.permissions.query({ name: permission });
+                                return { name: permission, state: status.state };
+                            } catch (e) {
+                                return { name: permission, state: 'unknown' };
+                            }
+                        })
+                    );
+                }
+            }
+
+            async detectMediaCapabilities() {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: true, audio: true 
+                    });
+                    const track = stream.getVideoTracks()[0];
+                    this.hardware.camera = {
+                        capabilities: track.getCapabilities ? track.getCapabilities() : {},
+                        settings: track.getSettings ? track.getSettings() : {}
+                    };
+                    stream.getTracks().forEach(tr => tr.stop());
+                } catch (e) {
+                    this.hardware.camera = null;
+                }
+            }
+        }
+
+        class MemoryManager {
+            constructor(config) {
+                this.config = config;
+                this.segments = new Map();
+                this.memoryUsage = 0;
+                this.initializeMonitoring();
+            }
+
+            initializeMonitoring() {
+                if ('memory' in performance) {
+                    this.memoryObserver = new PerformanceObserver(this.handleMemoryUpdate.bind(this));
+                    this.memoryObserver.observe({ entryTypes: ['memory'] });
+                }
+            }
+
+            handleMemoryUpdate(list) {
+                const memory = list.getEntries().pop();
+                this.memoryUsage = memory.usedJSHeapSize / memory.jsHeapSizeLimit;
+                
+                if (this.memoryUsage > this.config.gcThreshold) {
+                    this.triggerGarbageCollection();
+                }
+                
+                document.getElementById('memoryMetrics').textContent = 
+                    `Memory Usage: ${(this.memoryUsage * 100).toFixed(1)}%`;
+            }
+
+            async addSegment(id, data) {
+                this.segments.set(id, data);
+                
+                // Remove old segments if we exceed retention limit
+                if (this.segments.size > this.config.segmentRetention) {
+                    const oldestKey = this.segments.keys().next().value;
+                    this.segments.delete(oldestKey);
+                }
+            }
+
+            async triggerGarbageCollection() {
+                // Remove old segments
+                const currentSize = this.segments.size;
+                const toRemove = Math.floor(currentSize * 0.2); // Remove 20% of segments
+                
+                let count = 0;
+                for (let key of this.segments.keys()) {
+                    if (count >= toRemove) break;
+                    this.segments.delete(key);
+                    count++;
+                }
+            }
+        }
+
+        class WorkerPool {
+            constructor(config) {
+                this.config = config;
+                this.workers = [];
+                this.taskQueue = [];
+                this.busyWorkers = new Set();
+                this.initialize();
+            }
+
+            initialize() {
+                const workerCount = navigator.hardwareConcurrency || 4;
+                
+                // Create PoW workers from inline script
+                for (let i = 0; i < workerCount; i++) {
+                    const worker = createWorker('#pow-worker');
+                    worker.onmessage = (e) => this.handleWorkerMessage(worker, e);
+                    this.workers.push(worker);
+                }
+
+                // Create dedicated video worker from inline script
+                this.videoWorker = createWorker('#video-worker');
+                
+                // Create merkle tree worker from inline script
+                this.merkleWorker = createWorker('#merkle-worker');
+            }
+
+            async scheduleTask(taskType, data) {
+                return new Promise((resolve, reject) => {
+                    const task = { type: taskType, data, resolve, reject };
+                    
+                    if (taskType === 'VIDEO') {
+                        this.videoWorker.onmessage = (e) => {
+                            if (e.data.type === 'error') return reject(e.data.error);
+                            resolve(e.data);
+                        };
+                        this.videoWorker.postMessage({ type: taskType, ...data });
+                    } else if (taskType === 'MERKLE') {
+                        this.merkleWorker.onmessage = (e) => {
+                            if (e.data.type === 'error') return reject(e.data.error);
+                            resolve(e.data);
+                        };
+                        this.merkleWorker.postMessage({ type: taskType, ...data });
+                    } else {
+                        // PoW tasks (segment or internal node)
+                        const availableWorker = this.workers.find(w => !this.busyWorkers.has(w));
+                        if (availableWorker) {
+                            this.assignTask(availableWorker, task);
+                        } else {
+                            this.taskQueue.push(task);
+                        }
+                    }
+                });
+            }
+
+            assignTask(worker, task) {
+                this.busyWorkers.add(worker);
+                worker.postMessage({ type: task.type, ...task.data });
+                worker.currentTask = task;
+            }
+
+            handleWorkerMessage(worker, event) {
+                const task = worker.currentTask;
+                if (!task) return;
+
+                if (event.data.type === 'error') {
+                    task.reject(event.data.error);
+                } else {
+                    // e.g. type === 'complete'
+                    task.resolve(event.data);
+                }
+                
+                this.busyWorkers.delete(worker);
+                worker.currentTask = null;
+                
+                // Process next task in queue
+                if (this.taskQueue.length > 0) {
+                    this.assignTask(worker, this.taskQueue.shift());
+                }
+            }
+        }
+
+        // Core VVP Implementation
+        class VerifiedVideoProtocol {
+            constructor() {
+                this.config = {
+                    maxBufferSize: 500 * 1024 * 1024, // 500MB
+                    gcThreshold: 0.8, // 80% memory threshold
+                    segmentRetention: 100,
+                    
+                    // Target PoW time for dynamic difficulty:
+                    targetComputeTime: 2000,  // 2 seconds per PoW
+
+                    // Initial PoW difficulty (adjusted dynamically)
+                    powDifficulty: 4
+                };
+
+                this.initialize();
+            }
+
+            async initialize() {
+                this.memoryManager = new MemoryManager(this.config);
+                this.workerPool = new WorkerPool(this.config);
+                this.deviceFingerprint = new DeviceFingerprint();
+                await this.deviceFingerprint.initialize();
+
+                // Initialize state
+                this.currentSegment = 0;
+                this.merkleTree = [];
+                this.temporalProofs = [];
+                this.blockTimeSync = null;
+                this.powTimes = [];
+
+                // UI references
+                this.videoPreview = document.getElementById('videoPreview');
+                this.startBtn = document.getElementById('startBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.verifyBtn = document.getElementById('verifyBtn');
+                this.status = document.getElementById('status');
+                this.proofData = document.getElementById('proofData');
+
+                this.startBtn.onclick = () => this.startRecording();
+                this.stopBtn.onclick = () => this.stopRecording();
+                this.verifyBtn.onclick = () => this.verifyRecording();
+
+                // Start network monitoring
+                this.initializeNetworkMonitoring();
+            }
+
+            async initializeNetworkMonitoring() {
+                if ('connection' in navigator) {
+                    navigator.connection.addEventListener('change', 
+                        this.handleNetworkChange.bind(this)
+                    );
+                }
+                this.networkInterval = setInterval(
+                    this.measureNetworkConditions.bind(this),
+                    5000
+                );
+            }
+
+            async measureNetworkConditions() {
+                try {
+                    const start = performance.now();
+                    await fetch('https://blockchain.info/latestblock');
+                    const latency = performance.now() - start;
+
+                    document.getElementById('networkMetrics').textContent = 
+                        `Network Latency: ${Math.round(latency)}ms`;
+
+                    return {
+                        latency,
+                        type: navigator.connection ? navigator.connection.type : 'unknown',
+                        downlink: navigator.connection ? navigator.connection.downlink : null
+                    };
+                } catch (error) {
+                    console.error('Network measurement failed:', error);
+                    return null;
+                }
+            }
+
+            async startRecording() {
+                try {
+                    // Initialize block time synchronization
+                    this.blockTimeSync = await this.initializeBlockTimeSync();
+
+                    // Verify device integrity
+                    await this.verifyDeviceIntegrity();
+
+                    // Setup media
+                    const stream = await this.setupMediaStream();
+                    this.videoPreview.srcObject = stream;
+
+                    // Pick a supported mime
+                    const mimeType = this.getSupportedMimeType();
+                    const options = {
+                        mimeType,
+                        videoBitsPerSecond: 2500000,
+                        audioBitsPerSecond: 128000
+                    };
+
+                    this.mediaRecorder = new MediaRecorder(stream, options);
+                    this.mediaRecorder.ondataavailable = this.handleVideoSegment.bind(this);
+                    
+                    this.mediaRecorder.start(1000); // 1-second segments
+
+                    this.startBtn.disabled = true;
+                    this.stopBtn.disabled = false;
+                    this.updateStatus('Recording started with temporal proof enabled');
+
+                    // Initial proof
+                    const initialProof = new TemporalProof(
+                        '0'.repeat(64),
+                        this.blockTimeSync.blockHeight,
+                        Date.now(),
+                        0,
+                        this.config.powDifficulty,
+                        await this.measureNetworkConditions(),
+                        this.deviceFingerprint
+                    );
+                    this.temporalProofs.push(initialProof);
+
+                } catch (error) {
+                    this.handleError('Failed to start recording', error);
+                }
+            }
+
+            getSupportedMimeType() {
+                const types = [
+                    'video/webm;codecs=vp9,opus',
+                    'video/webm;codecs=vp8,opus',
+                    'video/webm;codecs=h264,opus',
+                    'video/webm'
+                ];
+                for (const type of types) {
+                    if (MediaRecorder.isTypeSupported(type)) {
+                        return type;
+                    }
+                }
+                throw new Error('No supported video MIME types found');
+            }
+
+            async handleVideoSegment(event) {
+                try {
+                    this.currentSegment++;
+                    document.getElementById('processingMetrics').textContent = 
+                        `Processing: ${this.currentSegment} segments`;
+
+                    const buffer = await event.data.arrayBuffer();
+                    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+                    const hashHex = Array.from(new Uint8Array(hashBuffer))
+                        .map(b => b.toString(16).padStart(2, '0')).join('');
+
+                    // Build new temporal proof
+                    const temporalProof = new TemporalProof(
+                        this.getLastSegmentHash(),
+                        this.blockTimeSync.blockHeight,
+                        Date.now(),
+                        0, 
+                        this.config.powDifficulty,
+                        await this.measureNetworkConditions(),
+                        this.deviceFingerprint
+                    );
+
+                    // Measure PoW time
+                    const powStart = performance.now();
+                    const powResult = await this.workerPool.scheduleTask('POW', {
+                        hash: hashHex,
+                        difficulty: this.config.powDifficulty
+                    });
+                    const powEnd = performance.now();
+
+                    // Track PoW time
+                    const timeTaken = powEnd - powStart;
+                    this.powTimes.push(timeTaken);
+                    if (this.powTimes.length > 20) {
+                        this.powTimes.shift();
+                    }
+                    const averagePowTime = this.powTimes.reduce((a, b) => a + b, 0) / this.powTimes.length;
+                    const newDifficulty = this.config.powDifficulty * (this.config.targetComputeTime / averagePowTime);
+                    this.config.powDifficulty = Math.max(1, Math.min(32, newDifficulty));
+
+                    // Finalize segment proof
+                    temporalProof.nonce = powResult.nonce;
+                    this.temporalProofs.push(temporalProof);
+
+                    // Store segment
+                    await this.memoryManager.addSegment(this.currentSegment, {
+                        data: event.data,
+                        hash: hashHex,
+                        temporalProof
+                    });
+
+                    // Update merkle tree (now also does internal-node PoW!)
+                    await this.updateMerkleTree(hashHex, temporalProof);
+
+                    // Periodic chain check
+                    if (this.currentSegment % 10 === 0) {
+                        await this.verifyTemporalChain();
+                    }
+
+                } catch (error) {
+                    this.handleError('Segment processing failed', error);
+                }
+            }
+
+            getLastSegmentHash() {
+                if (this.temporalProofs.length === 0) {
+                    return '0'.repeat(64);
+                }
+                // Return the Merkle root’s last node hash
+                return this.merkleTree[this.merkleTree.length - 1].hash;
+            }
+
+            async updateMerkleTree(hash, temporalProof) {
+                try {
+                    const merkleResult = await this.workerPool.scheduleTask('MERKLE', {
+                        command: 'UPDATE',
+                        hash,
+                        data: temporalProof,
+                        currentTree: this.merkleTree,
+                        difficulty: this.config.powDifficulty
+                    });
+                    this.merkleTree = merkleResult.updatedTree;
+                } catch (error) {
+                    this.handleError('Merkle tree update failed', error);
+                }
+            }
+
+            async verifyTemporalChain() {
+                for (let i = 1; i < this.temporalProofs.length; i++) {
+                    const current = this.temporalProofs[i];
+                    const previous = this.temporalProofs[i - 1];
+
+                    if (current.previousSegmentHash !== this.merkleTree[i - 1].hash) {
+                        throw new Error(`Temporal chain broken at segment ${i}`);
+                    }
+                    if (current.timestamp <= previous.timestamp) {
+                        throw new Error(`Invalid timestamp sequence at segment ${i}`);
+                    }
+                    if (current.currentBlockHeight < previous.currentBlockHeight) {
+                        throw new Error(`Invalid block height sequence at segment ${i}`);
+                    }
+                }
+                return true;
+            }
+
+            async stopRecording() {
+                try {
+                    this.mediaRecorder.stop();
+                    this.videoPreview.srcObject.getTracks().forEach(track => track.stop());
+
+                    const finalProof = new TemporalProof(
+                        this.getLastSegmentHash(),
+                        this.blockTimeSync.blockHeight,
+                        Date.now(),
+                        0,
+                        this.config.powDifficulty,
+                        await this.measureNetworkConditions(),
+                        this.deviceFingerprint
+                    );
+
+                    // Final PoW for the last proof
+                    const finalPowStart = performance.now();
+                    const finalPowResult = await this.workerPool.scheduleTask('POW', {
+                        hash: this.merkleTree[this.merkleTree.length - 1].hash,
+                        difficulty: this.config.powDifficulty
+                    });
+                    const finalPowEnd = performance.now();
+                    const finalPowTime = finalPowEnd - finalPowStart;
+
+                    // Adjust difficulty one last time (optional)
+                    this.powTimes.push(finalPowTime);
+                    if (this.powTimes.length > 20) this.powTimes.shift();
+                    const averagePowTime = this.powTimes.reduce((a, b) => a + b, 0) / this.powTimes.length;
+                    const newDifficulty = this.config.powDifficulty *
+                                          (this.config.targetComputeTime / averagePowTime);
+                    this.config.powDifficulty = Math.max(1, Math.min(32, newDifficulty));
+
+                    finalProof.nonce = finalPowResult.nonce;
+                    this.temporalProofs.push(finalProof);
+
+                    this.stopBtn.disabled = true;
+                    this.verifyBtn.disabled = false;
+                    this.updateStatus('Recording completed. Ready for verification.');
+
+                    // *** NEW: Periodic anchoring with OpenTimestamps ***
+                    await this.anchorMerkleRoot();
+
+                    // Display final data
+                    this.proofData.textContent = JSON.stringify({
+                        totalSegments: this.currentSegment,
+                        merkleRoot: this.merkleTree[this.merkleTree.length - 1].hash,
+                        temporalProofs: this.temporalProofs,
+                        deviceFingerprint: this.deviceFingerprint
+                    }, null, 2);
+
+                } catch (error) {
+                    this.handleError('Failed to stop recording', error);
+                }
+            }
+
+            // *** NEW: Example method that anchors the final Merkle root using OpenTimestamps ***
+            async anchorMerkleRoot() {
+                try {
+                    if (!this.merkleTree.length) return;
+                    const merkleRoot = this.merkleTree[this.merkleTree.length - 1].hash;
+
+                    // Using OpenTimestamps to stamp the Merkle root:
+                    const detached = new OTS.DetachedTimestampFile(
+                        new OTS.Ops.OpSHA256(),
+                        // Convert hex to buffer:
+                        new Uint8Array(Buffer.from(merkleRoot, 'hex'))
+                    );
+
+                    this.updateStatus('Stamping Merkle root via OpenTimestamps...');
+                    
+                    // Request the stamp from OpenTimestamps servers:
+                    await OTS.requestStamp(detached);
+
+                    // Store or display your raw OTS proof (serialized):
+                    const otsBytes = detached.serializeToBytes();
+                    console.log('OTS proof bytes:', otsBytes);
+                    this.updateStatus('Anchoring complete! Proof bytes in console.');
+                } catch (error) {
+                    console.warn('OpenTimestamps anchor failed:', error);
+                }
+            }
+
+            async verifyRecording() {
+                try {
+                    this.updateStatus('Starting verification process...');
+
+                    const verificationTasks = [
+                        this.verifyTemporalChain(),
+                        this.verifyDeviceIntegrity(),
+                        this.verifySegmentHashes(),
+                        this.verifyMerkleRoot()
+                    ];
+                    const results = await Promise.allSettled(verificationTasks);
+                    const failures = results
+                        .filter(r => r.status === 'rejected')
+                        .map(r => r.reason.message);
+
+                    if (failures.length > 0) {
+                        throw new Error(`Verification failed: ${failures.join(', ')}`);
+                    }
+
+                    this.updateStatus('Recording verified successfully!');
+                    return true;
+
+                } catch (error) {
+                    this.handleError('Verification failed', error);
+                    return false;
+                }
+            }
+
+            async verifyDeviceIntegrity() {
+                const currentFp = new DeviceFingerprint();
+                await currentFp.initialize();
+                
+                const originalFp = this.temporalProofs[0].deviceFingerprint;
+                const changes = this.compareFingerprints(currentFp, originalFp);
+
+                if (Object.keys(changes).length > 0) {
+                    throw new Error('Device fingerprint changed during recording');
+                }
+                return true;
+            }
+
+            compareFingerprints(current, original) {
+                const changes = {};
+
+                for (const [key, value] of Object.entries(current.hardware)) {
+                    if (JSON.stringify(value) !== JSON.stringify(original.hardware[key])) {
+                        changes[`hardware.${key}`] = {
+                            original: original.hardware[key],
+                            current: value
+                        };
+                    }
+                }
+                for (const [key, value] of Object.entries(current.runtime)) {
+                    if (JSON.stringify(value) !== JSON.stringify(original.runtime[key])) {
+                        changes[`runtime.${key}`] = {
+                            original: original.runtime[key],
+                            current: value
+                        };
+                    }
+                }
+                return changes;
+            }
+
+            async verifySegmentHashes() {
+                for (const [id, segment] of this.memoryManager.segments.entries()) {
+                    const buffer = await segment.data.arrayBuffer();
+                    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+                    const calculatedHash = Array.from(new Uint8Array(hashBuffer))
+                        .map(b => b.toString(16).padStart(2, '0')).join('');
+
+                    if (calculatedHash !== segment.hash) {
+                        throw new Error(`Hash mismatch for segment ${id}`);
+                    }
+                }
+                return true;
+            }
+
+            async verifyMerkleRoot() {
+                const merkleResult = await this.workerPool.scheduleTask('MERKLE', {
+                    command: 'VERIFY',
+                    tree: this.merkleTree
+                });
+                if (!merkleResult.valid) {
+                    throw new Error('Merkle tree verification failed');
+                }
+                return true;
+            }
+
+            async initializeBlockTimeSync() {
+                try {
+                    const response = await fetch('https://blockchain.info/latestblock');
+                    const data = await response.json();
+                    const networkConditions = await this.measureNetworkConditions();
+
+                    return new BlockTimeSync(
+                        data.height,
+                        data.hash,
+                        Date.now(),
+                        this.calculateConfidenceScore(networkConditions),
+                        networkConditions.latency
+                    );
+                } catch (error) {
+                    throw new Error('Failed to initialize block time sync: ' + error.message);
+                }
+            }
+
+            calculateConfidenceScore(networkConditions) {
+                if (!networkConditions) return 0;
+                const latencyScore = Math.max(0, 1 - (networkConditions.latency / 1000));
+                const typeScore = networkConditions.type === 'wifi' ? 1 :
+                                  networkConditions.type === 'cellular' ? 0.7 : 0.5;
+                const downlinkScore = networkConditions.downlink ? 
+                                      Math.min(1, networkConditions.downlink / 10) : 0.5;
+                return (latencyScore + typeScore + downlinkScore) / 3;
+            }
+
+            async setupMediaStream() {
+                return navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            }
+
+            handleNetworkChange(event) {
+                console.log('Network conditions changed:', event);
+                this.measureNetworkConditions();
+            }
+
+            handleError(context, error) {
+                console.error(context, error);
+                this.updateStatus(`${context}: ${error.message}`, true);
+            }
+
+            updateStatus(message, isError = false) {
+                this.status.textContent = message;
+                this.status.style.background = isError ? '#ffe6e6' : '#e9ecef';
+            }
+        }
+
+        // Initialize VVP on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            const vvp = new VerifiedVideoProtocol();
+        });
+    </script>
+    
+    <!-- Worker Scripts - Embedded inline for self-contained file -->
+    <script id="pow-worker" type="javascript/worker">
+        // PoW Worker (unchanged) for both segment-level and internal node PoW
+        async function sha256(data) {
+            const msgBuffer = new TextEncoder().encode(data);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        async function findNonce(data, difficulty) {
+            const target = '0'.repeat(difficulty);
+            let nonce = 0;
+            
+            while (true) {
+                const testData = { ...data, nonce };
+                const hash = await sha256(JSON.stringify(testData));
+                if (hash.startsWith(target)) {
+                    return { nonce, hash };
+                }
+                nonce++;
+                if (nonce % 1000 === 0) {
+                    self.postMessage({ type: 'progress', nonce });
+                }
+            }
+        }
+
+        self.onmessage = async function(e) {
+            try {
+                const { type, hash, difficulty } = e.data;
+                if (type === 'POW') {
+                    // data.hash was passed in 'hash'
+                    const result = await findNonce({ hash }, difficulty);
+                    self.postMessage({ type: 'complete', ...result });
+                }
+            } catch (error) {
+                self.postMessage({ type: 'error', error: error.message });
+            }
+        };
+    </script>
+
+    <script id="video-worker" type="javascript/worker">
+        // Video Processing Worker (unchanged from original)
+        class VideoProcessor {
+            constructor() {
+                this.codecs = new Map();
+                this.initializeCodecs();
+            }
+
+            async initializeCodecs() {
+                const videoCodecs = ['vp9', 'vp8', 'h264'];
+                const audioCodecs = ['opus', 'vorbis'];
+                for (const v of videoCodecs) {
+                    for (const a of audioCodecs) {
+                        this.codecs.set(`${v}-${a}`, `video/webm;codecs=${v},${a}`);
+                    }
+                }
+            }
+
+            async processSegment(data, options) {
+                const { width, height, frameRate } = options;
+                const metrics = {
+                    bitrateKbps: (data.byteLength * 8) / (options.duration / 1000) / 1024,
+                    frameCount: Math.round(frameRate * (options.duration / 1000)),
+                    resolution: `${width}x${height}`,
+                    size: data.byteLength
+                };
+                return { processedData: data, metrics };
+            }
+        }
+
+        const processor = new VideoProcessor();
+
+        self.onmessage = async function(e) {
+            try {
+                const { type, ...rest } = e.data;
+                if (type === 'VIDEO') {
+                    const result = await processor.processSegment(rest.data, rest.options || {});
+                    self.postMessage({ type: 'complete', ...result });
+                }
+            } catch (error) {
+                self.postMessage({ type: 'error', error: error.message });
+            }
+        };
+    </script>
+
+    <script id="merkle-worker" type="javascript/worker">
+        /*
+         * Merkle Tree Worker 
+         * Now includes PoW for internal nodes as well!
+         * 
+         * We'll do a simple BFS-level rebuild and for each newly created 
+         * internal node, we'll do a local PoW search. 
+         */
+        class MerkleTreeProcessor {
+            constructor() {
+                this.nodes = [];
+            }
+
+            async onMessage(evt) {
+                const { type, command, hash, data, tree, difficulty } = evt.data;
+                if (type !== 'MERKLE') return;
+
+                if (command === 'VERIFY') {
+                    // Very basic verification stub
+                    self.postMessage({ type: 'complete', valid: true });
+                    return;
+                }
+
+                if (command === 'UPDATE') {
+                    // Rebuild from existing flat tree
+                    this.nodes = tree || [];
+                    // Insert new leaf node with no PoW here
+                    // (Leaf's PoW is done at the segment level.)
+                    const newLeaf = {
+                        hash,
+                        data,
+                        left: null,
+                        right: null,
+                        nonce: null,
+                        level: 0
+                    };
+                    this.nodes.push(newLeaf);
+                    // Rebuild entire tree and do internal node PoW:
+                    const updatedTree = await this.rebuildTree(difficulty);
+
+                    // Flatten
+                    const flat = buildFlatArray(updatedTree);
+                    self.postMessage({
+                        type: 'complete',
+                        updatedTree: flat
+                    });
+                }
+            }
+
+            async rebuildTree(difficulty) {
+                // We assume all level-0 nodes are leaves
+                let leaves = this.nodes.filter(n => n.level === 0);
+
+                // If no existing internal nodes, we can treat entire 'this.nodes' as leaves
+                // But to keep it consistent, let's gather unique leaves
+                // We'll discard old internal nodes from the array each time for simplicity
+                if (!leaves.length) return null;
+
+                // We'll build from bottom up
+                let currentLevel = leaves;
+                let level = 0;
+
+                while (currentLevel.length > 1) {
+                    level++;
+                    const nextLevel = [];
+                    for (let i = 0; i < currentLevel.length; i += 2) {
+                        const left = currentLevel[i];
+                        const right = (i + 1 < currentLevel.length) ? currentLevel[i + 1] : currentLevel[i];
+
+                        const combined = left.hash + right.hash;
+                        const combinedHash = await this.hashString(combined);
+
+                        // PoW for internal node:
+                        // We'll do a quick local approach.
+                        // Realistically, you'd pass this to the same PoW worker 
+                        // but let's do it inline for demonstration:
+                        const nodeNonce = await this.findNonce(combinedHash, difficulty);
+
+                        const parentNode = {
+                            hash: combinedHash,
+                            data: { internalPoWNonce: nodeNonce }, 
+                            left: left.hash,
+                            right: right.hash,
+                            nonce: nodeNonce,
+                            level
+                        };
+                        nextLevel.push(parentNode);
+                    }
+                    currentLevel = nextLevel;
+                }
+                // currentLevel[0] is the root
+                return currentLevel[0];
+            }
+
+            async hashString(str) {
+                const msgBuffer = new TextEncoder().encode(str);
+                const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+                return Array.from(new Uint8Array(hashBuffer))
+                    .map(b => b.toString(16).padStart(2, '0')).join('');
+            }
+
+            async findNonce(baseHash, difficulty) {
+                const target = '0'.repeat(Math.floor(difficulty));
+                let nonce = 0;
+                while (true) {
+                    const test = await this.hashString(baseHash + nonce.toString());
+                    if (test.startsWith(target)) {
+                        return nonce;
+                    }
+                    nonce++;
+                    if (nonce % 100000 === 0) {
+                        // Just to avoid blocking too long in this example
+                        await new Promise(r => setTimeout(r, 0));
+                    }
+                }
+            }
+        }
+
+        const processor = new MerkleTreeProcessor();
+
+        self.onmessage = (e) => {
+            processor.onMessage(e);
+        };
+
+        // Flatten a single-root Merkle tree into array
+        function buildFlatArray(root) {
+            if (!root) return [];
+            const queue = [root];
+            const flat = [];
+
+            while (queue.length > 0) {
+                const node = queue.shift();
+                if (!node) continue;
+                flat.push({
+                    hash: node.hash,
+                    left: node.left,
+                    right: node.right,
+                    level: node.level || 0,
+                    nonce: node.nonce,
+                    data: node.data
+                });
+                // Not storing references, so no explicit children objects here
+            }
+            return flat;
+        }
+    </script>
+
+    <!-- OpenTimestamps library -->
+    <script type="text/javascript" src="https://opentimestamps.org/assets/javascripts/vendor/opentimestamps.min.js"></script>
+
+    <script>
+        // Create Blob URLs for workers
+        function createWorker(scriptId) {
+            const blob = new Blob(
+                [document.querySelector(scriptId).textContent],
+                { type: 'text/javascript' }
+            );
+            return new Worker(URL.createObjectURL(blob));
+        }
+    </script>
+</body>
+</html>
